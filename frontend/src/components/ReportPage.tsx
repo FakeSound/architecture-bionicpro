@@ -23,10 +23,17 @@ interface ReportRow {
   report_date: string;
 }
 
+interface ReportMeta {
+  report_url: string;
+  cached: boolean;
+  etl_date: string;
+}
+
 const ReportPage: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [reportData, setReportData] = useState<ReportRow[] | null>(null);
+  const [reportMeta, setReportMeta] = useState<ReportMeta | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,13 +50,23 @@ const ReportPage: React.FC = () => {
       setReportLoading(true);
       setError(null);
 
-      const res = await fetch(`${BFF_URL}/api/reports`, { credentials: 'include' });
-      const data = await res.json();
+      // Шаг 1: получить CDN URL из BFF (bionicpro-auth → bionicpro-reports)
+      const metaRes = await fetch(`${BFF_URL}/api/reports`, { credentials: 'include' });
+      const meta: ReportMeta & { error?: string } = await metaRes.json();
 
-      if (!res.ok) {
-        throw new Error(data.error ?? `Ошибка ${res.status}`);
+      if (!metaRes.ok) {
+        throw new Error(meta.error ?? `Ошибка ${metaRes.status}`);
       }
 
+      setReportMeta(meta);
+
+      // Шаг 2: загрузить JSON-файл напрямую с CDN (Nginx → MinIO)
+      const cdnRes = await fetch(meta.report_url);
+      if (!cdnRes.ok) {
+        throw new Error(`CDN вернул ${cdnRes.status}`);
+      }
+
+      const data: ReportRow[] = await cdnRes.json();
       setReportData(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки отчёта');
@@ -58,7 +75,7 @@ const ReportPage: React.FC = () => {
     }
   }, []);
 
-  // Автозагрузка отчёта при входе
+  // Автозагрузка при входе
   useEffect(() => {
     if (user) fetchReport();
   }, [user, fetchReport]);
@@ -71,7 +88,7 @@ const ReportPage: React.FC = () => {
 
   const logout = () => {
     fetch(`${BFF_URL}/auth/session`, { method: 'DELETE', credentials: 'include' })
-      .finally(() => { setUser(null); setReportData(null); });
+      .finally(() => { setUser(null); setReportData(null); setReportMeta(null); });
   };
 
   if (authLoading) {
@@ -125,12 +142,32 @@ const ReportPage: React.FC = () => {
           </div>
         </div>
 
+        {/* CDN-метаданные */}
+        {reportMeta && (
+          <div className="mb-4 p-3 bg-gray-50 rounded text-xs text-gray-500 flex items-center gap-4">
+            <span>
+              <span className={`font-semibold ${reportMeta.cached ? 'text-green-600' : 'text-orange-500'}`}>
+                {reportMeta.cached ? '● CDN cache hit' : '● CDN cache miss'}
+              </span>
+              {' '}— данные ETL от {reportMeta.etl_date}
+            </span>
+            <a
+              href={reportMeta.report_url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-blue-500 hover:underline truncate max-w-xs"
+            >
+              {reportMeta.report_url}
+            </a>
+          </div>
+        )}
+
         {/* Ошибка */}
         {error && (
           <div className="mb-6 p-4 bg-red-100 text-red-700 rounded">{error}</div>
         )}
 
-        {/* Скелетон загрузки */}
+        {/* Скелетон */}
         {reportLoading && reportData === null && (
           <div className="flex items-center justify-center py-16 text-gray-400">
             Загрузка данных...
