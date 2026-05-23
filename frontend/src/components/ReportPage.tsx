@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 
 const BFF_URL = 'http://localhost:8081';
 
@@ -9,9 +9,24 @@ interface User {
   roles: string[];
 }
 
+interface ReportRow {
+  keycloak_id: string;
+  first_name: string;
+  last_name: string;
+  email: string;
+  serial_number: string;
+  issued_at: string;
+  signal_type: string;
+  avg_signal: number;
+  signal_count: number;
+  last_recorded: string;
+  report_date: string;
+}
+
 const ReportPage: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [reportData, setReportData] = useState<ReportRow[] | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,6 +38,31 @@ const ReportPage: React.FC = () => {
       .finally(() => setAuthLoading(false));
   }, []);
 
+  const fetchReport = useCallback(async () => {
+    try {
+      setReportLoading(true);
+      setError(null);
+
+      const res = await fetch(`${BFF_URL}/api/reports`, { credentials: 'include' });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error ?? `Ошибка ${res.status}`);
+      }
+
+      setReportData(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка загрузки отчёта');
+    } finally {
+      setReportLoading(false);
+    }
+  }, []);
+
+  // Автозагрузка отчёта при входе
+  useEffect(() => {
+    if (user) fetchReport();
+  }, [user, fetchReport]);
+
   const login = () => {
     fetch(`${BFF_URL}/auth/login`, { credentials: 'include' })
       .then(res => res.json())
@@ -31,31 +71,13 @@ const ReportPage: React.FC = () => {
 
   const logout = () => {
     fetch(`${BFF_URL}/auth/session`, { method: 'DELETE', credentials: 'include' })
-      .finally(() => setUser(null));
-  };
-
-  const downloadReport = async () => {
-    try {
-      setReportLoading(true);
-      setError(null);
-
-      const res = await fetch(`${BFF_URL}/api/reports`, { credentials: 'include' });
-
-      if (!res.ok) throw new Error(`BFF returned error status: ${res.status}`);
-
-      const data = await res.json();
-      console.log('Report generated:', data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
-      setReportLoading(false);
-    }
+      .finally(() => { setUser(null); setReportData(null); });
   };
 
   if (authLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gray-100">
-        <p className="text-gray-600">Loading...</p>
+        <p className="text-gray-600">Загрузка...</p>
       </div>
     );
   }
@@ -67,7 +89,7 @@ const ReportPage: React.FC = () => {
           onClick={login}
           className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
         >
-          Login
+          Войти
         </button>
         {error && <p className="mt-4 text-red-600">{error}</p>}
       </div>
@@ -75,33 +97,94 @@ const ReportPage: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
-      <div className="p-8 bg-white rounded-lg shadow-md">
+    <div className="min-h-screen bg-gray-100 p-8">
+      <div className="max-w-6xl mx-auto bg-white rounded-lg shadow-md p-8">
+
+        {/* Шапка */}
         <div className="flex justify-between items-center mb-6">
-          <h1 className="text-2xl font-bold">Usage Reports</h1>
-          <button
-            onClick={logout}
-            className="px-3 py-1 text-sm bg-gray-500 text-white rounded hover:bg-gray-600"
-          >
-            Logout
-          </button>
+          <div>
+            <h1 className="text-2xl font-bold">Отчёт по устройствам</h1>
+            <p className="text-gray-500 text-sm mt-1">{user.name ?? user.email ?? user.sub}</p>
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={fetchReport}
+              disabled={reportLoading}
+              className={`px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 ${
+                reportLoading ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
+            >
+              {reportLoading ? 'Загрузка...' : 'Обновить'}
+            </button>
+            <button
+              onClick={logout}
+              className="px-3 py-2 text-sm bg-gray-500 text-white rounded hover:bg-gray-600"
+            >
+              Выйти
+            </button>
+          </div>
         </div>
 
-        <p className="mb-4 text-gray-600">Welcome, {user.name ?? user.email ?? user.sub}</p>
-
-        <button
-          onClick={downloadReport}
-          disabled={reportLoading}
-          className={`px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 ${
-            reportLoading ? 'opacity-50 cursor-not-allowed' : ''
-          }`}
-        >
-          {reportLoading ? 'Generating Report...' : 'Download Report'}
-        </button>
-
+        {/* Ошибка */}
         {error && (
-          <div className="mt-4 p-4 bg-red-100 text-red-700 rounded">{error}</div>
+          <div className="mb-6 p-4 bg-red-100 text-red-700 rounded">{error}</div>
         )}
+
+        {/* Скелетон загрузки */}
+        {reportLoading && reportData === null && (
+          <div className="flex items-center justify-center py-16 text-gray-400">
+            Загрузка данных...
+          </div>
+        )}
+
+        {/* Нет данных */}
+        {!reportLoading && reportData !== null && reportData.length === 0 && (
+          <div className="flex items-center justify-center py-16 text-gray-400">
+            Данных отчёта не найдено
+          </div>
+        )}
+
+        {/* Таблица */}
+        {reportData !== null && reportData.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left border-collapse">
+              <thead>
+                <tr className="bg-gray-50 border-b">
+                  <th className="px-4 py-3 font-semibold text-gray-600">Пользователь</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600">Серийный №</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600">Выдан</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600">Тип сигнала</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600 text-right">Ср. значение</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600 text-right">Измерений</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600">Последнее измерение</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600">Дата отчёта</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reportData.map((row, i) => (
+                  <tr key={i} className="border-b hover:bg-gray-50">
+                    <td className="px-4 py-3">
+                      <div>{row.first_name} {row.last_name}</div>
+                      <div className="text-gray-400 text-xs">{row.email}</div>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs">{row.serial_number}</td>
+                    <td className="px-4 py-3 text-gray-600">{row.issued_at}</td>
+                    <td className="px-4 py-3">
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs">
+                        {row.signal_type}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono">{row.avg_signal.toFixed(4)}</td>
+                    <td className="px-4 py-3 text-right">{row.signal_count}</td>
+                    <td className="px-4 py-3 text-gray-600 text-xs">{row.last_recorded}</td>
+                    <td className="px-4 py-3 text-gray-600">{row.report_date}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
       </div>
     </div>
   );

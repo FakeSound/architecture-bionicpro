@@ -162,7 +162,8 @@ $app->get('/auth/me', function (Request $request, Response $response) use (
 // GET /api/reports
 //
 // Защищённый прокси-эндпоинт: валидирует сессию, при необходимости
-// обновляет токен, выполняет ротацию и возвращает данные отчёта.
+// обновляет токен, выполняет ротацию сессии и проксирует запрос
+// в bionicpro-reports с Bearer-токеном.
 // ─────────────────────────────────────────────────────────────────────────────
 $app->get('/api/reports', function (Request $request, Response $response) use (
     $sessionManager, $keycloak, $cookieName, $cookieTtl
@@ -182,18 +183,31 @@ $app->get('/api/reports', function (Request $request, Response $response) use (
         $tokens['refresh_token']
     );
 
-    // Здесь был бы проксированный запрос к реальному API с Bearer-токеном.
-    // Пока возвращаем заглушку.
-    $userInfo = $sessionManager->decodeTokenPayload($tokens['access_token']);
     $cookieValue = "{$cookieName}={$newSessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age={$cookieTtl}";
+    $reportsUrl  = rtrim($_ENV['REPORTS_URL'] ?? 'http://bionicpro-reports:8082', '/');
+    $http        = new \GuzzleHttp\Client(['timeout' => 10]);
 
-    $response->getBody()->write(json_encode([
-        'message'    => 'Reports data',
-        'session_id' => $newSessionId, // для отладки ротации
-        'user'       => $userInfo['preferred_username'] ?? 'unknown',
-    ]));
+    try {
+        $upstream = $http->get("{$reportsUrl}/reports", [
+            'headers' => ['Authorization' => 'Bearer ' . $tokens['access_token']],
+        ]);
+        $body   = (string) $upstream->getBody();
+        $status = $upstream->getStatusCode();
+    } catch (\GuzzleHttp\Exception\BadResponseException $e) {
+        // bionicpro-reports вернул HTTP-ошибку (401, 503 и т.д.) — прокидываем её фронтенду
+        $body   = (string) $e->getResponse()->getBody();
+        $status = $e->getResponse()->getStatusCode();
+    } catch (\GuzzleHttp\Exception\GuzzleException $e) {
+        $response->getBody()->write(json_encode(['error' => 'Reports service unavailable']));
+        return $response
+            ->withStatus(502)
+            ->withHeader('Content-Type', 'application/json')
+            ->withHeader('Set-Cookie', $cookieValue);
+    }
 
+    $response->getBody()->write($body);
     return $response
+        ->withStatus($status)
         ->withHeader('Content-Type', 'application/json')
         ->withHeader('Set-Cookie', $cookieValue);
 });

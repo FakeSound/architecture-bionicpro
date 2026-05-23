@@ -24,7 +24,7 @@ COPY . .
 # Generate classmap
 RUN composer dump-autoload --optimize
 
-EXPOSE 8081
+EXPOSE 8082
 
 # Start the PHP built-in web server for Slim
-CMD ["php", "-S", "0.0.0.0:8081", "-t", "public"]
+CMD ["php", "-S", "0.0.0.0:8082", "-t", "public"]

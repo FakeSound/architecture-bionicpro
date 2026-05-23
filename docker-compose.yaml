@@ -1,5 +1,30 @@
 version: '3.8'
 
+x-airflow-common: &airflow-common
+  build:
+    context: ./airflow
+    dockerfile: Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__WEBSERVER__SECRET_KEY: 'bionicpro_airflow_secret'
+    CRM_POSTGRES_CONN: postgresql://crm:crm@crm-db/crm
+    BIONICPRO_POSTGRES_CONN: postgresql://bionicpro:bionicpro@bionicpro-db/bionicpro
+    CLICKHOUSE_HOST: clickhouse
+    CLICKHOUSE_PORT: 9000
+  volumes:
+    - ./airflow/dag.py:/opt/airflow/dags/dag.py
+    - ./airflow/requirements.txt:/opt/airflow/requirements.txt
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    airflow-postgres:
+      condition: service_healthy
+
 services:
   keycloak_db:
     image: postgres:14
@@ -11,6 +36,7 @@ services:
       - ./postgres-keycloak-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+
   keycloak:
     image: quay.io/keycloak/keycloak:21.1
     environment:
@@ -20,7 +46,7 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
-    command: 
+    command:
       - start-dev
       - --import-realm
     volumes:
@@ -30,6 +56,7 @@ services:
     depends_on:
       - keycloak_db
       - openldap
+
   frontend:
     build:
       context: ./frontend
@@ -76,6 +103,120 @@ services:
       REDIS_PORT: 6379
       FRONTEND_URL: http://localhost:3000
       REDIRECT_URI: http://localhost:3000/authentication/callback
+      REPORTS_URL: http://bionicpro-reports:8082
+    volumes:
+      - ./bionicpro-auth/public:/var/www/public
+      - ./bionicpro-auth/src:/var/www/src
     depends_on:
       - redis
       - keycloak
+      - bionicpro-reports
+
+  bionicpro-reports:
+    build:
+      context: ./bionicpro-reports
+      dockerfile: Dockerfile
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: reports-realm
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_DB: bionicpro
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    volumes:
+      - ./bionicpro-reports/public:/var/www/public
+      - ./bionicpro-reports/src:/var/www/src
+    depends_on:
+      - keycloak
+      - clickhouse
+
+  # Сервисы для Airflow
+
+  bionicpro-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: bionicpro
+      POSTGRES_PASSWORD: bionicpro
+      POSTGRES_DB: bionicpro
+    volumes:
+      - ./db/bionicpro-init.sql:/docker-entrypoint-initdb.d/init.sql
+      - bionicpro-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "bionicpro"]
+      interval: 10s
+      retries: 5
+
+  crm-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: crm
+      POSTGRES_PASSWORD: crm
+      POSTGRES_DB: crm
+    volumes:
+      - ./db/crm-init.sql:/docker-entrypoint-initdb.d/init.sql
+      - crm-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "crm"]
+      interval: 10s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./db/clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./db/clickhouse-users.xml:/etc/clickhouse-server/users.d/custom.xml
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      retries: 5
+
+  airflow-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+
+  airflow-webserver:
+    <<: *airflow-common
+    ports:
+      - "8082:8080"
+    command: webserver
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-webserver:
+        condition: service_healthy
+
+  airflow-init:
+    <<: *airflow-common
+    command: bash -c "airflow db init && airflow users create --username admin --firstname admin --lastname admin --role Admin --email admin@bionicpro.ru --password admin"
+
+volumes:
+  bionicpro-db-data:
+  crm-db-data:
+  clickhouse-data:
+  airflow-postgres-data:
