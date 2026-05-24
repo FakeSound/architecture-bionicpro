@@ -188,6 +188,7 @@ services:
 
   crm-db:
     image: postgres:16
+    command: postgres -c wal_level=logical
     environment:
       POSTGRES_USER: crm
       POSTGRES_PASSWORD: crm
@@ -253,6 +254,68 @@ services:
   airflow-init:
     <<: *airflow-common
     command: bash -c "airflow db init && airflow users create --username admin --firstname admin --lastname admin --role Admin --email admin@bionicpro.ru --password admin"
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+
+  kafka-connect:
+    image: quay.io/debezium/connect:2.6
+    platform: linux/amd64
+    depends_on:
+      kafka:
+        condition: service_healthy
+      crm-db:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: debezium_connect_configs
+      OFFSET_STORAGE_TOPIC: debezium_connect_offsets
+      STATUS_STORAGE_TOPIC: debezium_connect_statuses
+    ports:
+      - "8084:8083"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
+      interval: 10s
+      retries: 15
+      start_period: 60s
+
+  debezium-init:
+    image: curlimages/curl:latest
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+    restart: on-failure
+    command:
+      - -sf
+      - -X
+      - POST
+      - http://kafka-connect:8083/connectors
+      - -H
+      - "Content-Type: application/json"
+      - -d
+      - "@/connector.json"
+    volumes:
+      - ./debezium/connector.json:/connector.json:ro
 
 volumes:
   bionicpro-db-data:

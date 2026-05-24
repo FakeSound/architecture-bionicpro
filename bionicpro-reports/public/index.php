@@ -131,7 +131,7 @@ $app->get('/reports', function (Request $request, Response $response): Response 
     // ── 6. Cache miss: запрашиваем ClickHouse ───────────────────────────────
     // keycloak_id берётся только из JWT (sub), не из query params.
     // Параметризованный запрос исключает SQL-инъекцию.
-    $reportSql = "SELECT * FROM {$chDb}.report_by_user WHERE keycloak_id = {keycloak_id:String} FORMAT JSON";
+    $reportSql = "SELECT * FROM {$chDb}.report_by_user_v2 FINAL WHERE keycloak_id = {keycloak_id:String} FORMAT JSON";
     try {
         $rptResponse = $ch->get('/', [
             'query' => [

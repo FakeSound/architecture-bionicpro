@@ -16,29 +16,14 @@ default_args = {
 with DAG(
     dag_id='bionicpro_reports_etl',
     default_args=default_args,
-    description='ETL: CRM + телеметрия → ClickHouse витрина',
+    description='ETL: телеметрия → ClickHouse (CRM-данные поступают через CDC)',
     schedule='@daily',
     start_date=datetime(2024, 1, 1),
     catchup=False,
 ) as dag:
 
     @task
-    def extract_from_crm():
-        conn = psycopg2.connect(os.environ['CRM_POSTGRES_CONN'])
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cursor.execute("""
-            SELECT keycloak_id, first_name, last_name,
-                   email, serial_number, issued_at
-            FROM clients
-            WHERE keycloak_id IS NOT NULL
-        """)
-        rows = [dict(row) for row in cursor.fetchall()]
-        cursor.close()
-        conn.close()
-        return rows
-
-    @task
-    def extract_from_bionicpro():
+    def extract_telemetry():
         conn = psycopg2.connect(os.environ['BIONICPRO_POSTGRES_CONN'])
         cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         cursor.execute("""
@@ -57,35 +42,6 @@ with DAG(
         return rows
 
     @task
-    def transform(crm_data: list, telemetry_data: list) -> list:
-        crm_by_id = {row['keycloak_id']: row for row in crm_data}
-        today = datetime.now().date()
-        result = []
-
-        for t in telemetry_data:
-            kid = t['keycloak_id']
-            if kid not in crm_by_id:
-                continue
-
-            client = crm_by_id[kid]
-            result.append({
-                'keycloak_id':   kid,
-                'first_name':    client['first_name'],
-                'last_name':     client['last_name'],
-                'email':         client['email'],
-                'serial_number': client['serial_number'],
-                'issued_at':     client['issued_at'],
-                'signal_type':   t['signal_type'],
-                'avg_signal':    float(t['avg_signal']),
-                'signal_count':  int(t['signal_count']),
-                'last_recorded': t['last_recorded'],
-                'report_date':   today,
-            })
-
-        print(f"Трансформировано строк: {len(result)}")
-        return result
-
-    @task
     def load_to_clickhouse(data: list):
         if not data:
             print("Нет данных для загрузки")
@@ -97,17 +53,18 @@ with DAG(
             database='bionicpro',
         )
 
-        ch.execute('INSERT INTO report_by_user VALUES', data)
+        today = datetime.now().date()
+        rows = [{**row, 'report_date': today} for row in data]
+
+        # Записываем агрегированную телеметрию; MV report_mv сделает JOIN с crm_clients
+        ch.execute('INSERT INTO telemetry_agg VALUES', rows)
 
         ch.execute(
             'INSERT INTO etl_watermark VALUES',
             [{'dag_id': 'bionicpro_reports_etl', 'last_run': datetime.now()}]
         )
 
-        print(f"Загружено строк: {len(data)}")
+        print(f"Загружено строк: {len(rows)}")
 
-    # ── порядок выполнения ──────────────────────────────────
-    crm_data       = extract_from_crm()
-    telemetry_data = extract_from_bionicpro()
-    transformed    = transform(crm_data, telemetry_data)
-    load_to_clickhouse(transformed)
+    telemetry_data = extract_telemetry()
+    load_to_clickhouse(telemetry_data)
